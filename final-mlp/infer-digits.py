@@ -1,3 +1,8 @@
+"""
+Differences from Dylans code:
+
+"""
+
 import torch, time 
 from torch import nn, optim
 from torchvision import datasets, transforms
@@ -54,8 +59,13 @@ def ProjectDataLoader(digits_dir="../digits"):
     return images, labels
 
 # Create the dataset of the classes digits pngs to use in testing the mlp
+# class datset wrapper for the ProjectDataLoader function above
+# lets us plug in the class digit set into a PyTorch DataLoader
+# where we can apply the same transforms (ToTensor/Normalize) that we do to MINST
 class ProjectDigitsDataset(torch.utils.data.Dataset):
+
     def __init__(self, digits_dir="../digits", transform=None):
+        # load all the images abd labels intp np arrays
         self.images_np, self.labels_np = ProjectDataLoader(digits_dir)
         self.transform = transform
 
@@ -63,19 +73,30 @@ class ProjectDigitsDataset(torch.utils.data.Dataset):
         return len(self.labels_np)
 
     def __getitem__(self, idx):
+        # get the 28 x 28 np image and label oh shapr (28, 28)
         img_arr = self.images_np[idx]
         label = int(self.labels_np[idx])
 
+        # convert the np array back to a PIL image so that we can apply
+        # torchvision transforms (ToTensor/Normalize)
+        # using mode="L" is just 8-bit grayscale
         img = Image.fromarray(img_arr.astype(np.uint8), mode="L")
 
+        # apply the same transform pipeline as MNIST to img
         if self.transform is not None:
             img = self.transform(img)
 
         return img, label
 
 # Define mlp 
-#later tune: Hidden sizes, Dropout rate, Learning rate, Batch size, Number of epochs
+# later tune: Hidden sizes, Dropout rate, Learning rate, Batch size, Number of epochs
+# mlp model architecture: fuuly connected feed forward network
+# - input: 28*28 = 784 features (flattened image)
+# - hidden layers: 256, 128, 64 with ReLU
+# - dropout: 0.2 to reduce the amount of overfitting
+# - output: 10 logits (one per digit)
 class MLP(nn.Module):
+
     def __init__(self):
         super().__init__()
         self.fc1 = nn.Linear(28*28, 256)
@@ -85,14 +106,21 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(0.2)
         
     def forward(self, x):
+        # flatten from (batch, 1, 28, 28) to (batch, 784)
         x = x.view(x.size(0), -1)
+        # apply fully connected layers with ReLU and dropout
         x = self.dropout(torch.relu(self.fc1(x)))
         x = self.dropout(torch.relu(self.fc2(x)))
         x = self.dropout(torch.relu(self.fc3(x)))
+        # final layer outputs raw logits
+        # CroddEntropyLoss handles the softmax internally
         x = self.fc4(x)
         return x
 
 # evaluate the model on the MINST test set now
+# Evaluation helper used for both MNIST and class data
+# computes average loss and accuracy over the given DataLoader
+# keep this funcitong eneric by being able to pass in "criterion"
 def evaluate(model, dataloader, device, criterion):
     model.eval()
     correct = 0
@@ -101,50 +129,91 @@ def evaluate(model, dataloader, device, criterion):
 
     with torch.no_grad():
         for images, labels in dataloader:
+            # move batch to GPU/CPU if s=using the A100 like i am
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
+            # forward pass
             logits = model(images)
             loss = criterion(logits, labels)
+            # accumulate total (sum of loss * batch size)
             running_loss += loss.item() * images.size(0)
 
+            # compute predictions and count correct ones
             _, preds = torch.max(logits, 1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
+
+    # avoid divion by zero is dataloader is empty
+    if total == 0:
+        return float("nan"), float("nan")
 
     avg_loss = running_loss / total
     accuracy = correct / total
     return avg_loss, accuracy
 
 # main training and evaluation calls
+# Main funciton:
+# - load and preprocesss MNIST train and test data
+# - train the MLP on MNISt data
+# - evaluate on MNIST test set
+# - load class digits set, preprocess it, and evaluate it on MLP
 def main():
 
     batch_size = 128
 
-    # load the MINST data
-    # transform MINST data to a tensor using ToTensor and then normlaize using Normalize
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+    # define transforms for image preprocessing:
+    # - ToTensor: [0, 255] -> [0, 1]
+    # - Normalize(mean=0.5, std=0.5): [0, 1] -> [-1, 1]
+    # use these same transforms for both MNISt and class data so its consistent for the MLP
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
 
-    # define the training set from the MINST data
-    trainset = datasets.MNIST(root="~/MNIST_data", train=True, download=True, transform=transform)
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True,
-                                              num_workers=2, pin_memory=True)
+    # download MNIST training set: used for training the MLP
+    trainset = datasets.MNIST(
+            root="~/MNIST_data",
+            train=True,
+            download=True,
+            transform=transform
+    )
+    trainloader = torch.utils.data.DataLoader(
+            trainset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=2,
+            pin_memory=True
+    )
 
-    # define the test set from the MINST data
-    testset = datasets.MNIST(root="~/MNIST_data", train=False, download=True, transform=transform)
+    # download MNISt test set: used to evaluate loss/accuracy
+    testset = datasets.MNIST(
+            root="~/MNIST_data",
+            train=False,
+            download=True,
+            transform=transform
+    )
+    testloader = torch.utils.data.DataLoader(
+            testset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=2,
+            pin_memory=True
+    )
 
-    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False,
-                                             num_workers=2, pin_memory=True)
-
-    # confirm length of train/test sets
-    len(trainset), len(testset)
-
+    # initalize model, loss, and optimizer
+    # - MLP() is the fully connected network
+    # - CrossEntropyLoss = softmax + log loss
+    # - Adam optimizer with lr=1e-3 (this is pretty common)
     model = MLP().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    # Establish a training loop that has loss logging so we can ensure loss is going down
-
+    # training loop:
+    # - run for fixed number of epochs (we should change this and graph results)
+    # - for each epoch: iterate iver all the training batches
+    # - compute loss, backprop, and update weights
+    # - track and print the average training loss per epoch: shows us if the model is improving
     epochs = 10
     train_losses = []
     val_losses = []
@@ -158,12 +227,18 @@ def main():
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
         
+            # zero out gradients from previous step
             optimizer.zero_grad()
+            # forward pass
             logits = model(images)
+            # compute training loss
             loss = criterion(logits, labels)
+            # backward pass
             loss.backward()
+            # update parameters
             optimizer.step()
-        
+         
+            # accumulate the total loss
             running_loss += loss.item() * images.size(0)
 
         epoch_loss = running_loss / len(trainloader.dataset)
@@ -184,20 +259,34 @@ def main():
     plt.show()
     """
 
+    # Evaluate the trained MLP on the MNISt test set
+    # this shows us the baseline performance on the stndardized data
+    # then we will have to compare this to the class digits performance 
     test_loss, test_acc = evaluate(model, testloader, device, criterion)
     print(f"MNIST Test loss: {test_loss:.4f}, accuracy: {100*test_acc:.2f}%")
 
+    # load the class digits from "../digits" and check shapes/labels
     images_np, labels_np = ProjectDataLoader("../digits")
-    images_np.shape, labels_np.shape, np.unique(labels_np, return_counts=True)
+    print("Project digits shapes:", images_np.shape, labels_np.shape)
+    print("Label distribution (digit, count):", np.unique(labels_np, return_counts=True))
 
-    project_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+    # build Dataset and DataLoader for the class digits using the same transforms as MNIST
+    # now we cna reuse the same evaluation code that we sued for MNIST
+    project_transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
 
     project_dataset = ProjectDigitsDataset("../digits", transform=project_transform)
     project_loader = torch.utils.data.DataLoader(
-        project_dataset, batch_size=64, shuffle=False, num_workers=1, pin_memory=True
+        project_dataset,
+        batch_size=64,
+        shuffle=False,
+        num_workers=1,
+        pin_memory=True
     )
 
-    len(project_dataset)
+    print("Project digits dataset size:", len(project_dataset))
 
     """
     accuracy is lower on real handwritten digits:
@@ -208,9 +297,10 @@ def main():
     - No convolutional filters
     --> So off center digits or unusual writing styles confuse it
 
-    Some submitted images are low quality/too faint/weird background/wrong color inversion/poor stroke thickness
-    and Dataset is small and small test datasets produce volatile accuracy
+    Some submitted images are low quality/too faint/weird background/wrong color inversion/not thick
+    and Dataset is small and small test datasets produce bad accuracy
     """
+    # evaluate the smae trained MLP on the class digits
     proj_loss, proj_acc = evaluate(model, project_loader, device, criterion)
     print(f"Class handwritten digits - loss: {proj_loss:.4f}, accuracy: {100*proj_acc:.2f}%")
 
