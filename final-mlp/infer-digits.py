@@ -1,6 +1,27 @@
 """
 Differences from Dylans code:
-
+- i kept the overall design of:
+  * an mlp with 3 hidden layers
+  * a ProjectDataLoader that reads pngs and extracts labels fromt he filenames
+  * visualizing the predicitons like the professor does witht he image and bar chart
+- i changed a couple things:
+  * relative "../digits" path so we can all use the code
+  * i have additions so i can run the code on the schoole A100 machine,
+    but should run fine still locally
+  * i use a Dataset and DataLoader fro the class digits so i can use the same
+    evaluation code for the class digits that is used for MNIST
+  * added dropout and regularization
+- we can still add:
+  * preprocessing for the class digits so they look more like MNISt
+    - centering the digits and resizing them (cropping)
+    - make cure they are black background and white digit even tho i think shen did this
+  * add more hidden units in the hidden layer
+  * train for more epochs
+  * decrease the learnign rate
+-- these are all things we should vary and then present how they resulted in over/underfitting
+   or how they agve us the perfect medium for getting the best accuracy
+  * change the transform for just the training data so it accepts some rotations/shifts during
+    training so the model isnt so sensitive to this when testing
 """
 
 import torch, time 
@@ -10,6 +31,32 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from PIL import Image
 import numpy as np
+
+# visualization helper adapted from Dylans code:
+# - given a single image tensor and the probability vector over each digit:
+# -- plot the image on the left
+# -- plot the horizontal bar chart of probabilities on the right
+def plot_prediction(image_tensor, probs, filename):
+    
+    image_np = image_tensor.squeeze().cpu().numpy()
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+
+    # left: the digit image
+    ax1.imshow(image_np, cmap="viridis")
+    ax1.axis("off")
+
+    # right: Probability bars
+    y_pos = np.arange(10)
+    ax2.barh(y_pos, probs)
+    ax2.set_yticks(y_pos)
+    ax2.set_yticklabels([str(d) for d in range(10)])
+    ax2.set_xlim(0, 1)
+    ax2.set_title("Class Probability")
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150)
+    plt.close(fig)
 
 # i am running on the A100
 # use the GPU here if it is available, if not use CPU like usual
@@ -216,7 +263,6 @@ def main():
     # - track and print the average training loss per epoch: shows us if the model is improving
     epochs = 10
     train_losses = []
-    val_losses = []
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -272,12 +318,7 @@ def main():
 
     # build Dataset and DataLoader for the class digits using the same transforms as MNIST
     # now we cna reuse the same evaluation code that we sued for MNIST
-    project_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-
-    project_dataset = ProjectDigitsDataset("../digits", transform=project_transform)
+    project_dataset = ProjectDigitsDataset("../digits", transform=transform)
     project_loader = torch.utils.data.DataLoader(
         project_dataset,
         batch_size=64,
@@ -303,6 +344,39 @@ def main():
     # evaluate the smae trained MLP on the class digits
     proj_loss, proj_acc = evaluate(model, project_loader, device, criterion)
     print(f"Class handwritten digits - loss: {proj_loss:.4f}, accuracy: {100*proj_acc:.2f}%")
+
+    # analysis/visualization:
+    # - build a tensor of all project images
+    # - run the model once to get logits
+    # - convert logits to probabilities using softmax
+    # - for each image, print true vs predicted and show the probability bar chart and  image
+    if len(project_dataset) > 0:
+        
+        # build a single big batch of all project images
+        imgs_tensor = torch.stack([project_dataset[i][0] for i in range(len(project_dataset))])
+        lbls_array = np.array([project_dataset[i][1] for i in range(len(project_dataset))])
+
+        imgs_tensor_device = imgs_tensor.to(device)
+        with torch.no_grad():
+            logits_all = model(imgs_tensor_device)
+            probs_all = torch.softmax(logits_all, dim=1).cpu().numpy()
+
+        preds_array = probs_all.argmax(axis=1)
+        overall_correct = (preds_array == lbls_array).sum()
+        print(f"[Per-image check] Team Images Accuracy: {overall_correct / len(lbls_array):.2f}")
+
+        # plot a some examples
+        output_dir = "predictions"
+        Path(output_dir).mkdir(exist_ok=True)
+        
+        for i in range(len(imgs_tensor)):
+            img_t = imgs_tensor[i]
+            p = probs_all[i]
+            true_label = lbls_array[i]
+            pred_label = preds_array[i]
+            print(f"Image {i} --- True: {true_label}, Predicted: {pred_label}")
+            filename = f"{output_dir}/digit_{i}_true{true_label}_pred{pred_label}.png"
+            plot_prediction(img_t, p, filename)
 
 # entry point
 if __name__ == "__main__":
